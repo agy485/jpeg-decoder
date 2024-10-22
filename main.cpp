@@ -445,35 +445,43 @@ void analyze_jpeg(const char* filename,
 
 // 處理dc
 JHUFF_TBL* create_huffman_table(j_compress_ptr cinfo, const std::map<int, int>& dc_freq_map) {
-    // 分配新的 JHUFF_TBL 對象
+    // 分配新的 JHUFF_TBL 对象
     JHUFF_TBL* huff_tbl = jpeg_alloc_huff_table((j_common_ptr)cinfo);
 
     if (!huff_tbl) {
-        fprintf(stderr, "無法分配霍夫曼表\n");
+        fprintf(stderr, "无法分配霍夫曼表\n");
         return NULL;
     }
 
-    // 初始化頻率數組
+    // 初始化频率数组
     long freq[257] = {0}; // 索引 0 - 256
 
-    // 將符號頻率填入 freq 數組
+    // 将符号频率填入 freq 数组
     for (const auto& pair : dc_freq_map) {
         int symbol = pair.first;
         int frequency = pair.second;
 
-        // 確保符號值在有效範圍内（DC 分類通常為 0 - 11）
+        // 确保符号值在有效范围内（DC 分类通常为 0 - 11）
         if (symbol < 0 || symbol > 11) {
-            fprintf(stderr, "DC 符號超出範圍: %d\n", symbol);
+            fprintf(stderr, "DC 符号超出范围: %d\n", symbol);
             continue;
         }
 
         freq[symbol] = frequency;
     }
 
+    // 确保符号 0 到 11 都有非零频率
+    for (int i = 0; i <= 11; i++) {
+        if (freq[i] == 0) {
+            freq[i] = 1; // 设定最小频率
+        }
+    }
+
     generate_optimal_huffman_table(freq, huff_tbl);
 
     return huff_tbl;
 }
+
 
 // 處理ac
 JHUFF_TBL* create_huffman_table_ac(j_compress_ptr cinfo, const std::map<std::pair<int, int>, int>& ac_freq_map) {
@@ -484,13 +492,25 @@ JHUFF_TBL* create_huffman_table_ac(j_compress_ptr cinfo, const std::map<std::pai
         return NULL;
     }
 
-    // 初始化频率數組
+    // 初始化频率数组
     long freq[257] = {0}; // 索引 0 - 256
 
-    // 將 (Run, Size) 符號映射到符號值，並填入 freq 數組
+    // 初始化所有可能的 AC 符号频率为 0
+    for (int run = 0; run <= 15; run++) {
+        for (int size = 1; size <= 10; size++) {
+            int symbol = (run << 4) | size;
+            freq[symbol] = 0;
+        }
+    }
+    // 添加特殊符号 EOB 和 ZRL
+    freq[0x00] = 0; // EOB
+    freq[0xF0] = 0; // ZRL
+
+    // 将 (Run, Size) 符号映射到符号值，并填入 freq 数组
     for (const auto& pair : ac_freq_map) {
         int run = pair.first.first;
         int size = pair.first.second;
+        int frequency = pair.second;
         int symbol;
 
         if (run == 0 && size == 0) {
@@ -501,13 +521,30 @@ JHUFF_TBL* create_huffman_table_ac(j_compress_ptr cinfo, const std::map<std::pai
             symbol = (run << 4) | size;
         }
 
-        // 確保符號值在 0 - 255 之間
+        // 确保符号值在 0 - 255 之间
         if (symbol < 0 || symbol > 255) {
-            fprintf(stderr, "AC 符號超出範圍: run=%d, size=%d, symbol=%d\n", run, size, symbol);
+            fprintf(stderr, "AC 符号超出范围: run=%d, size=%d, symbol=%d\n", run, size, symbol);
             continue;
         }
 
-        freq[symbol] = pair.second;
+        freq[symbol] = frequency;
+    }
+
+    // 确保所有可能的 AC 符号频率至少为 1
+    for (int run = 0; run <= 15; run++) {
+        for (int size = 1; size <= 10; size++) {
+            int symbol = (run << 4) | size;
+            if (freq[symbol] == 0) {
+                freq[symbol] = 1;
+            }
+        }
+    }
+    // 对特殊符号 EOB 和 ZRL 也进行处理
+    if (freq[0x00] == 0) {
+        freq[0x00] = 1; // EOB
+    }
+    if (freq[0xF0] == 0) {
+        freq[0xF0] = 1; // ZRL
     }
 
     generate_optimal_huffman_table(freq, huff_tbl);
@@ -520,13 +557,13 @@ void write_jpeg_with_custom_huffman(const char* input_filename, const char* outp
                                     const std::map<int, int>& dc_freq_CbCr, const std::map<std::pair<int, int>, int>& ac_freq_CbCr) {
     FILE* infile = fopen(input_filename, "rb");
     if (!infile) {
-        fprintf(stderr, "無法打開文件 %s\n", input_filename);
+        fprintf(stderr, "无法打开文件 %s\n", input_filename);
         return;
     }
 
     FILE* outfile = fopen(output_filename, "wb");
     if (!outfile) {
-        fprintf(stderr, "無法創建文件 %s\n", output_filename);
+        fprintf(stderr, "无法创建文件 %s\n", output_filename);
         fclose(infile);
         return;
     }
@@ -549,32 +586,27 @@ void write_jpeg_with_custom_huffman(const char* input_filename, const char* outp
         return;
     }
 
-    // 初始化解壓縮對象
+    // 初始化解压缩对象
     jpeg_create_decompress(&cinfo);
     jpeg_stdio_src(&cinfo, infile);
     jpeg_read_header(&cinfo, TRUE);
 
-    // 開始解壓縮
-    jpeg_start_decompress(&cinfo);
+    // 读取 DCT 系数
+    jvirt_barray_ptr* coef_arrays = jpeg_read_coefficients(&cinfo);
 
-    // 初始化壓縮對象
+    // 初始化压缩对象
     jpeg_create_compress(&out_cinfo);
     jpeg_stdio_dest(&out_cinfo, outfile);
 
-    // 設置壓縮參數
-    out_cinfo.image_width = cinfo.image_width;
-    out_cinfo.image_height = cinfo.image_height;
-    out_cinfo.input_components = 3;  // JPEG 預設 YCbCr 色彩空間有三個成分（Y, Cb, Cr）
-    // out_cinfo.in_color_space = JCS_YCbCr;
-    // out_cinfo.in_color_space = JCS_RGB;
-    // cinfo.out_color_space = out_cinfo.in_color_space;
+    // 复制关键参数
+    jpeg_copy_critical_parameters(&cinfo, &out_cinfo);
 
-    jpeg_set_defaults(&out_cinfo);
+    out_cinfo.restart_interval = cinfo.restart_interval;
 
-    // 禁用優化編碼，以使用自定義霍夫曼表
+    // 禁用优化编码，以使用自定义霍夫曼表
     out_cinfo.optimize_coding = FALSE;
 
- // 为 Y 组件生成自定义霍夫曼表
+    // 为 Y 组件生成自定义霍夫曼表
     JHUFF_TBL* custom_dc_tbl_Y = create_huffman_table(&out_cinfo, dc_freq_Y);
     JHUFF_TBL* custom_ac_tbl_Y = create_huffman_table_ac(&out_cinfo, ac_freq_Y);
 
@@ -610,26 +642,40 @@ void write_jpeg_with_custom_huffman(const char* input_filename, const char* outp
     memcpy(out_cinfo.ac_huff_tbl_ptrs[1]->bits, custom_ac_tbl_C->bits, sizeof(custom_ac_tbl_C->bits));
     memcpy(out_cinfo.ac_huff_tbl_ptrs[1]->huffval, custom_ac_tbl_C->huffval, sizeof(custom_ac_tbl_C->huffval));
 
-    // 对组件分别设置霍夫曼表编号
-    out_cinfo.comp_info[0].dc_tbl_no = 0; // Y 组件使用表 0
-    out_cinfo.comp_info[0].ac_tbl_no = 0;
+    // 确保组件数量一致
+    out_cinfo.num_components = cinfo.num_components;
 
-    out_cinfo.comp_info[1].dc_tbl_no = 1; // Cb 组件使用表 1
-    out_cinfo.comp_info[1].ac_tbl_no = 1;
-
-    out_cinfo.comp_info[2].dc_tbl_no = 1; // Cr 组件使用表 1
-    out_cinfo.comp_info[2].ac_tbl_no = 1;
-
-    jpeg_start_compress(&out_cinfo, TRUE);
-
-    JSAMPARRAY buffer = (*cinfo.mem->alloc_sarray)
-        ((j_common_ptr)&cinfo, JPOOL_IMAGE, cinfo.output_width * cinfo.output_components, 1);
-    while (cinfo.output_scanline < cinfo.output_height) {
-        jpeg_read_scanlines(&cinfo, buffer, 1);
-        jpeg_write_scanlines(&out_cinfo, buffer, 1);
+    // 复制量化表
+    for (int i = 0; i < NUM_QUANT_TBLS; i++) {
+        if (cinfo.quant_tbl_ptrs[i] != NULL) {
+            out_cinfo.quant_tbl_ptrs[i] = jpeg_alloc_quant_table((j_common_ptr)&out_cinfo);
+            memcpy(out_cinfo.quant_tbl_ptrs[i]->quantval, cinfo.quant_tbl_ptrs[i]->quantval, sizeof(cinfo.quant_tbl_ptrs[i]->quantval));
+        }
     }
 
-    // 完成壓縮和解壓縮
+    // 复制组件信息
+    for (int i = 0; i < out_cinfo.num_components; i++) {
+        out_cinfo.comp_info[i].component_id = cinfo.comp_info[i].component_id;
+        out_cinfo.comp_info[i].h_samp_factor = cinfo.comp_info[i].h_samp_factor;
+        out_cinfo.comp_info[i].v_samp_factor = cinfo.comp_info[i].v_samp_factor;
+        out_cinfo.comp_info[i].quant_tbl_no = cinfo.comp_info[i].quant_tbl_no;
+
+        // 设置组件使用的霍夫曼表编号
+        if (i == 0) {
+            // Y 组件使用表 0
+            out_cinfo.comp_info[i].dc_tbl_no = 0;
+            out_cinfo.comp_info[i].ac_tbl_no = 0;
+        } else {
+            // Cb 和 Cr 组件使用表 1
+            out_cinfo.comp_info[i].dc_tbl_no = 1;
+            out_cinfo.comp_info[i].ac_tbl_no = 1;
+        }
+    }
+
+    // 写入系数数据
+    jpeg_write_coefficients(&out_cinfo, coef_arrays);
+
+    // 完成压缩和解压缩
     jpeg_finish_compress(&out_cinfo);
     jpeg_destroy_compress(&out_cinfo);
 
@@ -639,6 +685,7 @@ void write_jpeg_with_custom_huffman(const char* input_filename, const char* outp
     fclose(infile);
     fclose(outfile);
 }
+
 
 int main(int argc, char* argv[]) {
     if (argc != 3) {
