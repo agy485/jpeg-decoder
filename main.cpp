@@ -56,6 +56,80 @@ int compare_nodes(const void *a, const void *b);
 void assign_code_lengths(Node *node, int depth, Symbol symbols[], int num_symbols, int *max_code_length);
 void free_huffman_tree(Node *node);
 
+int find_common_prefix_length(const Symbol symbols[], int num_symbols) {
+    if (num_symbols == 0) return 0;
+
+    // 找到最大碼長
+    int max_length = 17;
+    for (int i = 0; i < num_symbols; i++) {
+        if (symbols[i].code_length < max_length) {
+            max_length = symbols[i].code_length;
+        }
+    }
+
+    // 從最高位開始累加比較
+    for (int bit_pos = 0; bit_pos < max_length; bit_pos++) {
+        // 取第一個符號的當前位作為比較對象，並進行碼長檢查
+        unsigned int prefix = 0;
+        if (bit_pos < symbols[0].code_length) {
+            prefix = (symbols[0].code >> (symbols[0].code_length - bit_pos - 1)) & 1;
+        }
+
+        bool mismatch = false;
+        for (int i = 1; i < num_symbols; i++) {
+            // 檢查當前符號碼長，避免比較超過符號有效位元長度的位
+            unsigned int current_bit = 0;
+            if (bit_pos < symbols[i].code_length) {
+                current_bit = (symbols[i].code >> (symbols[i].code_length - bit_pos - 1)) & 1;
+            }
+
+            // 比較每個符號在當前位的值
+            if (current_bit != prefix) {
+                // 如果發現不一致，則返回當前的前綴長度
+                printf("Mismatch found at bit position: %d\n", bit_pos);
+                return bit_pos;
+            }
+        }
+
+        // 在內層迴圈結束後，檢查所有符號移除前 bit_pos + 1 位後，剩餘的位元是否全為 1
+        bool all_remaining_bits_are_one = false;
+        for (int i = 0; i < num_symbols; i++) {
+            int remaining_bits = symbols[i].code_length - (bit_pos + 1);
+            if (remaining_bits <= 0) {
+                // 沒有剩餘位元，繼續檢查下一個符號
+                continue;
+            }
+            // 建立遮罩來取得剩餘位元
+            unsigned int mask = (remaining_bits >= 32) ? ~0U : ((1U << remaining_bits) - 1);
+            unsigned int remaining = symbols[i].code & mask;
+            if (remaining == mask) {
+                // 如果剩餘位元不是全 1，則不滿足條件
+                all_remaining_bits_are_one = true;
+                break;
+            }
+        }
+
+        if (all_remaining_bits_are_one) {
+            printf("All remaining bits are 1 after removing %d bits.\n", bit_pos + 1);
+            return bit_pos;
+        }
+    }
+
+    // 如果所有符號在所有位上都一致，則返回最大長度
+    return max_length;
+}
+
+
+void remove_common_prefix(Symbol symbols[], int num_symbols, int common_prefix_length) {
+    if (common_prefix_length == 0) return;
+
+    // 將所有符號的編碼左移以去除共同前綴
+    for (int i = 0; i < num_symbols; i++) {
+        // symbols[i].code >>= common_prefix_length;
+        symbols[i].code_length -= common_prefix_length;
+    }
+}
+
 void generate_optimal_huffman_table(const long freq[257], JHUFF_TBL* htbl) {
     int num_symbols = 0;
     Symbol symbols[MAX_SYMBOLS];
@@ -176,6 +250,10 @@ void generate_optimal_huffman_table(const long freq[257], JHUFF_TBL* htbl) {
         symbols[i].code = code;
         code++;
     }
+
+    int common_prefix_length = find_common_prefix_length(symbols, num_symbols);
+
+    remove_common_prefix(symbols, num_symbols, common_prefix_length);
 
     // Build the Huffman table
     memset(htbl->bits, 0, sizeof(htbl->bits));
